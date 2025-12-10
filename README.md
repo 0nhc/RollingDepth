@@ -66,7 +66,7 @@ Returns a .npy file as an attachment containing the raw depth values:
 Follow the following steps to install RollingDepth on the MSR server.
 
 ```sh
-git clone https://github.com/prs-eth/RollingDepth.git
+git clone https://github.com/0nhc/RollingDepth.git
 cd RollingDepth
 micromamba create -n rollingdepth python=3.10
 micromamba activate rollingdepth
