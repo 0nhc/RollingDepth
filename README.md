@@ -1,3 +1,92 @@
+Here is the README formatted exactly like the example you provided, tailored for your RollingDepth Flask server implementation.
+
+# RollingDepth on MSR Server
+
+This repository provides a simple Flask-based HTTP API wrapper around the original RollingDepth demo. Instead of running scripts locally, you can deploy the model as a network service and call it from any machine.
+
+## What it does
+
+The server exposes a single HTTP endpoint that performs video depth estimation using the RollingDepth framework.
+
+### Endpoint
+
+`POST /process_video`
+
+### Input (multipart/form-data)
+
+**Required files:**
+
+  * `video` - RGB video file (e.g., .mp4, .avi, .mov)
+
+**Optional parameters:**
+
+  * `preset` - Inference configuration preset. Options: `fast`, `fast1024`, `full`, `paper`. (default: `paper`)
+
+### Processing Pipeline
+
+The server performs the following steps:
+
+1.  **Video Upload & Validation**
+
+      - Receives and saves the video file to a temporary unique directory
+      - Validates file integrity
+
+2.  **Configuration & Pre-processing**
+
+      - Applies the selected preset configuration (Resolution, Dilation rates, Refinement steps)
+      - Resizes input frames according to the preset resolution (e.g., 768px or 1024px)
+
+3.  **Rolling Depth Estimation**
+
+      - **Latent Video Diffusion:** Encodes video into VAE latent space
+      - **Rolling Window Denoising:** Predicts depth using a diffusion model with temporal attention across rolling windows
+      - **Coarse-to-Fine Refinement:** (If using `paper` or `full` preset) Iteratively refines depth details
+
+4.  **Output Formatting**
+
+      - Decodes prediction back to pixel space
+      - Formats the output as a NumPy array `[Frames, Height, Width]`
+      - Cleans up temporary files from the server
+
+### Output
+
+Returns a .npy file as an attachment containing the raw depth values:
+
+  * Shape: `(N, H, W)` where N is the frame count
+  * Data type: Floating point depth values
+
+### Use Cases
+
+  * **Video Depth Estimation** - Generate consistent depth maps for video sequences
+  * **3D Reconstruction** - Use depth maps for downstream 3D scene reconstruction
+  * **Visual Effects** - Depth-aware video editing and compositing
+
+## Installation
+
+Follow the following steps to install RollingDepth on the MSR server.
+
+```sh
+git clone https://github.com/prs-eth/RollingDepth.git
+cd RollingDepth
+micromamba create -n rollingdepth python=3.10
+micromamba activate rollingdepth
+micromamba install conda-forge::cuda-toolkit=12.1 conda-forge::ffmpeg
+pip install -r requirements.txt
+bash script/install_diffusers_dev.sh
+```
+
+## Quick Start
+
+```sh
+# Run these commands on the Lamb or Sheep server.
+python server.py
+```
+
+```sh
+# Run this script on your own laptop.
+python client.py
+```
+
 # 🛹 RollingDepth: Video Depth without Video Models
 
 **CVPR 2025**
