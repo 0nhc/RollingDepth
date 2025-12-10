@@ -1,5 +1,3 @@
-Here is the README formatted exactly like the example you provided, tailored for your RollingDepth Flask server implementation.
-
 # RollingDepth on MSR Server
 
 This repository provides a simple Flask-based HTTP API wrapper around the original RollingDepth demo. Instead of running scripts locally, you can deploy the model as a network service and call it from any machine.
@@ -79,12 +77,12 @@ bash script/install_diffusers_dev.sh
 
 ```sh
 # Run these commands on the Lamb or Sheep server.
-python server.py
+python flask_server.py
 ```
 
 ```sh
 # Run this script on your own laptop.
-python client.py
+python flask_client.py
 ```
 
 # 🛹 RollingDepth: Video Depth without Video Models
