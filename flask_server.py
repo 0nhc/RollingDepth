@@ -4,6 +4,7 @@ import logging
 import traceback
 import shutil
 from pathlib import Path
+import types
 
 import numpy as np
 import torch
@@ -18,7 +19,6 @@ from rollingdepth import (
     RollingDepthPipeline,
     get_video_fps,
 )
-from src.util.colorize import colorize_depth_multi_thread
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
@@ -35,11 +35,10 @@ class RollingDepthServer:
         self.setup_routes()
 
         # -------------------- Model Initialization --------------------
-        # We load the model ONCE at startup to save time per request.
-        # We default to fp32 to ensure compatibility with the 'paper' preset.
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logging.info(f"Loading RollingDepth model on {self.device}...")
         
+        # Use fp32 as default
         self.pipe: RollingDepthPipeline = RollingDepthPipeline.from_pretrained(
             self.checkpoint, torch_dtype=torch.float32
         )
@@ -51,17 +50,40 @@ class RollingDepthServer:
             logging.warning("Run without xformers")
 
         self.pipe = self.pipe.to(self.device)
+        
+        # --- FIX: Register Hook to auto-move inputs to GPU ---
+        self.register_gpu_hook()
+        
         logging.info("Model loaded successfully.")
 
+    def register_gpu_hook(self):
+        """
+        Registers a forward_pre_hook on the VAE encoder.
+        This intercepts the input tensor right before it hits the GPU layers
+        and ensures it is on the correct device.
+        """
+        def hook_fn(module, args):
+            # args[0] is the input tensor (batch)
+            x = args[0]
+            # Check if input is a tensor and on the wrong device
+            if torch.is_tensor(x) and x.device != self.device:
+                x = x.to(self.device)
+                return (x,) + args[1:]
+            return args
+
+        # The error happens in self.vae.encoder(batch)
+        # So we attach the hook to the encoder module.
+        self.pipe.vae.encoder.register_forward_pre_hook(hook_fn)
+        logging.info("Applied GPU hook to VAE encoder.")
+
     def get_config_for_preset(self, preset_name):
-        """Replicates the logic from the official demo to merge arguments."""
         # Default Base Config
         args = OmegaConf.create(
             {
                 "res": 768,
                 "snippet_lengths": [3],
                 "cap_dilation": True,
-                "dtype": "fp32", # Defaulting to 32 for safety in server context
+                "dtype": "fp32",
                 "refine_snippet_len": 3,
                 "refine_start_dilation": 6,
                 "start_frame": 0,
@@ -74,38 +96,11 @@ class RollingDepthServer:
             }
         )
 
-        # Preset Dictionary (Copied from demo)
         preset_args_dict = {
-            "fast": OmegaConf.create(
-                {
-                    "dilations": [1, 25],
-                    "refine_step": 0,
-                    "dtype": "fp16"
-                }
-            ),
-            "fast1024": OmegaConf.create(
-                {
-                    "res": 1024,
-                    "dilations": [1, 25],
-                    "refine_step": 0,
-                    "dtype": "fp16"
-                }
-            ),
-            "full": OmegaConf.create(
-                {
-                    "res": 1024,
-                    "dilations": [1, 10, 25],
-                    "refine_step": 10,
-                }
-            ),
-            "paper": OmegaConf.create(
-                {
-                    "dilations": [1, 10, 25],
-                    "cap_dilation": False,
-                    "dtype": "fp32",
-                    "refine_step": 10,
-                }
-            ),
+            "fast": OmegaConf.create({"dilations": [1, 25], "refine_step": 0, "dtype": "fp16"}),
+            "fast1024": OmegaConf.create({"res": 1024, "dilations": [1, 25], "refine_step": 0, "dtype": "fp16"}),
+            "full": OmegaConf.create({"res": 1024, "dilations": [1, 10, 25], "refine_step": 10}),
+            "paper": OmegaConf.create({"dilations": [1, 10, 25], "cap_dilation": False, "dtype": "fp32", "refine_step": 10}),
         }
 
         if preset_name in preset_args_dict:
@@ -113,7 +108,6 @@ class RollingDepthServer:
             args.update(preset_args_dict[preset_name])
         else:
             logging.warning(f"Preset '{preset_name}' not found. Using defaults.")
-            # Fallback default dilations if not set
             if "dilations" not in args:
                 args.dilations = [1, 10, 25]
                 args.refine_step = 10
@@ -123,20 +117,11 @@ class RollingDepthServer:
     def setup_routes(self):
         @self.app.route('/process_video', methods=['POST'])
         def process_video():
-            """
-            Expects:
-            - files['video']: The RGB video file.
-            - form['preset']: (Optional) 'paper', 'fast', etc. Default: 'paper'
-            
-            Returns:
-            - .npy file containing the depth data.
-            """
             request_id = uuid.uuid4().hex
             work_dir = Path(self.work_root) / request_id
             work_dir.mkdir(parents=True, exist_ok=True)
             
             try:
-                # 1. Input Validation
                 if 'video' not in request.files:
                     return jsonify({'error': 'No video file provided'}), 400
                 
@@ -146,15 +131,12 @@ class RollingDepthServer:
 
                 preset = request.form.get('preset', 'paper')
 
-                # 2. Save Video
                 filename = secure_filename(video_file.filename)
                 input_video_path = work_dir / filename
                 video_file.save(str(input_video_path))
                 
-                # 3. Configure Logic
                 args = self.get_config_for_preset(preset)
                 
-                # 4. Inference
                 logging.info(f"[{request_id}] Starting inference on {filename} with preset {preset}")
                 
                 generator = None
@@ -185,20 +167,13 @@ class RollingDepthServer:
                         unload_snippet=args.unload_snippet,
                     )
 
-                # 5. Save Output
-                # The pipeline output (pipe_out.depth_pred) is [N, 1, H, W]
-                # We save it to disk to stream it back using send_file
                 depth_pred = pipe_out.depth_pred
-                
                 output_npy_filename = f"{input_video_path.stem}_depth.npy"
                 output_npy_path = work_dir / output_npy_filename
                 
                 logging.info(f"[{request_id}] Saving npy to {output_npy_path}")
-                
-                # Removing the channel dimension (1) as per original demo logic: .squeeze(1)
                 np.save(output_npy_path, depth_pred.cpu().numpy().squeeze(1))
 
-                # 6. Return File
                 return send_file(
                     output_npy_path,
                     mimetype='application/octet-stream',
@@ -211,8 +186,6 @@ class RollingDepthServer:
                 return jsonify({'error': str(e)}), 500
             
             finally:
-                # 7. Cleanup
-                # Using shutil to remove the uuid folder
                 if work_dir.exists():
                     try:
                         shutil.rmtree(work_dir)
@@ -221,7 +194,6 @@ class RollingDepthServer:
                         logging.error(f"Error cleaning up {work_dir}: {e}")
 
     def run(self):
-        # host=0.0.0.0 allows access from other machines
         self.app.run(host='0.0.0.0', port=7000, debug=False)
 
 if __name__ == '__main__':
